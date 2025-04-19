@@ -1,112 +1,72 @@
-import sqlite3
+from app import db
+from app import Usuario, Cliente  # Importe suas classes Model corretamente
 
 def criar_banco():
-    conn = sqlite3.connect('clientes.db')
-    cursor = conn.cursor()
-    
-    # Tabela de usuários (login)
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS usuarios (
-        login TEXT PRIMARY KEY,
-        senha TEXT NOT NULL
-    )
-    ''')
-    
-    # Tabela de profissionais
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS profissionais (
-        id INTEGER PRIMARY KEY,
-        nome_completo TEXT NOT NULL,
-        funcao TEXT NOT NULL,
-        telefone TEXT,
-        municipio TEXT NOT NULL,
-        escola TEXT NOT NULL
-    )
-    ''')
-    
-    # Tabela de horários de planejamento
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS horarios_planejamento (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        profissional_id INTEGER,
-        dia_semana TEXT NOT NULL,
-        hora TEXT NOT NULL,
-        FOREIGN KEY (profissional_id) REFERENCES profissionais(id)
-    )
-    ''')
-    
-    # Insere usuário padrão (se não existir)
-    cursor.execute("SELECT * FROM usuarios WHERE login = '01099080150'")
-    if not cursor.fetchone():
-        cursor.execute("INSERT INTO usuarios VALUES (?, ?)", 
-                      ('01099080150', '123456'))
-    
-    conn.commit()
-    conn.close()
+    db.create_all()
+
+    # Inserir usuário padrão se não existir
+    if not Usuario.query.filter_by(login='01099080150').first():
+        usuario_padrao = Usuario(login='01099080150', senha='123456')
+        db.session.add(usuario_padrao)
+        db.session.commit()
+
 
 def alterar_senha(login, senha_atual, nova_senha):
-    conn = sqlite3.connect('clientes.db')
-    cursor = conn.cursor()
-    
-    try:
-        # Verificar senha atual
-        cursor.execute("SELECT * FROM usuarios WHERE login = ? AND senha = ?", (login, senha_atual))
-        if cursor.fetchone():
-            # Atualizar senha
-            cursor.execute("UPDATE usuarios SET senha = ? WHERE login = ?", (nova_senha, login))
-            conn.commit()
-            return True
-        else:
-            return False
-    finally:
-        conn.close()
+    usuario = Usuario.query.filter_by(login=login, senha=senha_atual).first()
+    if usuario:
+        usuario.senha = nova_senha
+        db.session.commit()
+        return True
+    return False
+
 
 def reordenar_ids():
-    conn = sqlite3.connect('clientes.db')
-    cursor = conn.cursor()
-    
     try:
-        cursor.execute("BEGIN TRANSACTION")
-        
-        # Pegar todos os dados em ordem
-        cursor.execute('''
-        SELECT nome_completo, funcao, telefone, municipio, escola,
-               GROUP_CONCAT(dia_semana || ' ' || hora, ', ') as horarios
-        FROM profissionais p
-        LEFT JOIN horarios_planejamento h ON p.id = h.profissional_id
-        GROUP BY p.id
-        ORDER BY nome_completo
-        ''')
-        dados = cursor.fetchall()
-        
-        # Limpar todas as tabelas
-        cursor.execute("DELETE FROM horarios_planejamento")
-        cursor.execute("DELETE FROM profissionais")
-        
-        # Reinserir dados com IDs sequenciais
-        for i, (nome, funcao, telefone, municipio, escola, horarios) in enumerate(dados, 1):
-            # Inserir profissional com ID específico
-            cursor.execute('''
-            INSERT INTO profissionais (id, nome_completo, funcao, telefone, municipio, escola)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ''', (i, nome, funcao, telefone, municipio, escola))
-            
-            # Inserir horários se existirem
+        # Busca e ordena os dados
+        dados = db.session.execute('''
+            SELECT p.id, p.nome_completo, p.funcao, p.telefone, p.municipio, p.escola,
+                   GROUP_CONCAT(h.dia_semana || ' ' || h.hora, ', ') AS horarios
+            FROM profissionais p
+            LEFT JOIN horarios_planejamento h ON p.id = h.profissional_id
+            GROUP BY p.id
+            ORDER BY p.nome_completo
+        ''').fetchall()
+
+        # Limpa os dados
+        db.session.execute('DELETE FROM horarios_planejamento')
+        db.session.execute('DELETE FROM profissionais')
+        db.session.commit()
+
+        # Reinserção com IDs sequenciais
+        novo_id = 1
+        for linha in dados:
+            nome, funcao, telefone, municipio, escola, horarios = linha[1:]
+            db.session.execute('''
+                INSERT INTO profissionais (id, nome_completo, funcao, telefone, municipio, escola)
+                VALUES (:id, :nome, :funcao, :telefone, :municipio, :escola)
+            ''', {
+                'id': novo_id, 'nome': nome, 'funcao': funcao, 'telefone': telefone,
+                'municipio': municipio, 'escola': escola
+            })
+
             if horarios:
-                for horario in horarios.split(', '):
-                    if horario:
-                        dia_semana, hora = horario.rsplit(' ', 1)
-                        cursor.execute('''
-                        INSERT INTO horarios_planejamento (profissional_id, dia_semana, hora)
-                        VALUES (?, ?, ?)
-                        ''', (i, dia_semana, hora))
-        
-        cursor.execute("COMMIT")
+                for h in horarios.split(', '):
+                    if h:
+                        dia_semana, hora = h.rsplit(' ', 1)
+                        db.session.execute('''
+                            INSERT INTO horarios_planejamento (profissional_id, dia_semana, hora)
+                            VALUES (:prof_id, :dia, :hora)
+                        ''', {
+                            'prof_id': novo_id,
+                            'dia': dia_semana,
+                            'hora': hora
+                        })
+
+            novo_id += 1
+
+        db.session.commit()
         return True
-        
+
     except Exception as e:
-        cursor.execute("ROLLBACK")
+        db.session.rollback()
         raise e
-    
-    finally:
-        conn.close()
